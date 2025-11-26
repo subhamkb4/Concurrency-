@@ -409,6 +409,13 @@
             text-shadow: 0 0 10px rgba(255, 215, 0, 0.7);
         }
 
+        .concurrency-value {
+            color: #00ff00;
+            font-weight: 900;
+            font-style: italic;
+            text-shadow: 0 0 10px rgba(0, 255, 0, 0.7);
+        }
+
         .proxy-status {
             display: inline-block;
             padding: 4px 12px;
@@ -910,6 +917,18 @@
                 </label>
                 <input type="text" id="proxyInput" placeholder="ip:port or ip:port:user:pass">
                 <div class="proxy-check-msg" id="proxyCheckMsg"></div>
+                
+                <label class="proxy-label">
+                    Concurrency: <span class="concurrency-value" id="concurrencyDisplay">3 Cards</span>
+                </label>
+                <select id="concurrencySelect">
+                    <option value="1">1 Card</option>
+                    <option value="2">2 Cards</option>
+                    <option value="3" selected>3 Cards</option>
+                    <option value="4">4 Cards</option>
+                    <option value="5">5 Cards</option>
+                </select>
+                
                 <label class="proxy-label">
                     Delay Between Cards: <span class="delay-value" id="delayDisplay">2 Seconds</span>
                 </label>
@@ -1003,6 +1022,8 @@
         let approvedCards = [];
         let declinedCards = [];
         let allResults = [];
+        let activeRequests = 0;
+        let maxConcurrency = 3;
 
         // Update CC counter
         function updateCcCounter() {
@@ -1086,6 +1107,13 @@
             }
         });
 
+        document.getElementById('concurrencySelect').addEventListener('change', function() {
+            const concurrencyDisplay = document.getElementById('concurrencyDisplay');
+            const value = this.value;
+            maxConcurrency = parseInt(value);
+            concurrencyDisplay.textContent = value === '1' ? '1 Card' : value + ' Cards';
+        });
+
         document.getElementById('delaySelect').addEventListener('change', function() {
             const delayDisplay = document.getElementById('delayDisplay');
             const value = this.value;
@@ -1138,10 +1166,8 @@
             }
         }
 
-        async function checkCard(cardData, skipDelay = false) {
+        async function checkCard(cardData) {
             const proxy = document.getElementById('proxyInput').value.trim();
-            const delaySeconds = parseInt(document.getElementById('delaySelect').value);
-            const delayMs = delaySeconds * 1000;
             
             // Shopify specific validation and auto-filtering
             let shopifySites = [];
@@ -1162,10 +1188,6 @@
             }
             
             try {
-                if (!skipDelay) {
-                    await new Promise(resolve => setTimeout(resolve, delayMs));
-                }
-                
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 30000);
                 
@@ -1287,6 +1309,26 @@
             document.getElementById('declinedTabCount').textContent = insufficientCount + dieCount;
         }
 
+        async function processCardBatch(cards, startIndex, batchSize) {
+            const batch = cards.slice(startIndex, startIndex + batchSize);
+            const promises = batch.map(card => {
+                activeRequests++;
+                return checkCard(card.trim()).finally(() => {
+                    activeRequests--;
+                });
+            });
+            
+            const results = await Promise.allSettled(promises);
+            
+            results.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    addResult(batch[index], result.value);
+                } else {
+                    addResult(batch[index], 'Error: ' + result.reason);
+                }
+            });
+        }
+
         async function startChecking() {
             const input = document.getElementById('cardInput').value.trim();
             const proxy = document.getElementById('proxyInput').value.trim();
@@ -1354,28 +1396,36 @@
             document.getElementById('cardInput').disabled = true;
             document.getElementById('proxyInput').disabled = true;
             document.getElementById('delaySelect').disabled = true;
+            document.getElementById('concurrencySelect').disabled = true;
             
             if (selectedGateway === 'shopify') {
                 document.getElementById('shopifySites').disabled = true;
                 document.getElementById('shopifyProxies').disabled = true;
             }
             
-            let cardIndex = 0;
-            for (const card of cards) {
-                if (!isChecking) break;
+            let currentIndex = 0;
+            const delaySeconds = parseInt(document.getElementById('delaySelect').value);
+            const delayMs = delaySeconds * 1000;
+            
+            while (currentIndex < cards.length && isChecking) {
+                const remainingCards = cards.length - currentIndex;
+                const batchSize = Math.min(maxConcurrency, remainingCards);
                 
-                const skipDelay = cardIndex === 0;
-                const response = await checkCard(card.trim(), skipDelay);
-                addResult(card.trim(), response);
+                await processCardBatch(cards, currentIndex, batchSize);
+                currentIndex += batchSize;
                 
-                cardIndex++;
-                
-                if (cardIndex % 10 === 0 && cardIndex < cards.length) {
-                    proxyCheckMsg.textContent = `⏳ Processed ${cardIndex} cards. Waiting 10 seconds before continuing...`;
-                    proxyCheckMsg.className = 'proxy-check-msg';
-                    proxyCheckMsg.style.display = 'block';
-                    await new Promise(resolve => setTimeout(resolve, 10000));
-                    proxyCheckMsg.style.display = 'none';
+                if (currentIndex < cards.length && isChecking) {
+                    // Wait before next batch
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                    
+                    // Every 30 cards, wait 10 seconds to avoid rate limiting
+                    if (currentIndex % 30 === 0 && currentIndex < cards.length) {
+                        proxyCheckMsg.textContent = `⏳ Processed ${currentIndex} cards. Waiting 10 seconds before continuing...`;
+                        proxyCheckMsg.className = 'proxy-check-msg';
+                        proxyCheckMsg.style.display = 'block';
+                        await new Promise(resolve => setTimeout(resolve, 10000));
+                        proxyCheckMsg.style.display = 'none';
+                    }
                 }
             }
             
@@ -1389,6 +1439,7 @@
             document.getElementById('cardInput').disabled = false;
             document.getElementById('proxyInput').disabled = false;
             document.getElementById('delaySelect').disabled = false;
+            document.getElementById('concurrencySelect').disabled = false;
             
             if (selectedGateway === 'shopify') {
                 document.getElementById('shopifySites').disabled = false;
